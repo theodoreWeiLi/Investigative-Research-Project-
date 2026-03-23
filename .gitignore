@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+voice-icar-federico-ii-database-1.0.0/
+*.dat
+*.hea
+*.txt
