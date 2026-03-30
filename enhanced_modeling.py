@@ -2,13 +2,16 @@ import glob
 import json
 import os
 import warnings
+import argparse
 
 import librosa
 import numpy as np
 import pandas as pd
 import wfdb
 from imblearn.over_sampling import SMOTE
+from imblearn.over_sampling import RandomOverSampler
 from imblearn.pipeline import Pipeline as ImbPipeline
+from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
@@ -28,6 +31,39 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.svm import SVC
 
 warnings.filterwarnings("ignore", category=UserWarning)
+
+
+class ReliefFSelector(BaseEstimator, TransformerMixin):
+    """Feature selector wrapper for skrebate.ReliefF so it can be used in sklearn pipelines."""
+
+    def __init__(self, n_features_to_select=30, n_neighbors=50):
+        self.n_features_to_select = n_features_to_select
+        self.n_neighbors = n_neighbors
+        self.selector_ = None
+        self.support_indices_ = None
+
+    def fit(self, X, y):
+        from skrebate import ReliefF
+
+        X_arr = np.asarray(X)
+        y_arr = np.asarray(y)
+
+        n_features = X_arr.shape[1]
+        n_select = min(self.n_features_to_select, n_features)
+        n_neighbors = min(self.n_neighbors, max(1, len(y_arr) - 1))
+
+        self.selector_ = ReliefF(
+            n_features_to_select=n_select,
+            n_neighbors=n_neighbors,
+        )
+        self.selector_.fit(X_arr, y_arr)
+        self.support_indices_ = np.argsort(self.selector_.feature_importances_)[::-1][:n_select]
+        return self
+
+    def transform(self, X):
+        if self.support_indices_ is None:
+            return X
+        return X[:, self.support_indices_]
 
 
 def parse_metadata(data_dir: str) -> pd.DataFrame:
@@ -88,51 +124,111 @@ def parse_metadata(data_dir: str) -> pd.DataFrame:
     # Healthy = 0, Pathological = 1
     df_meta["Label"] = df_meta["Diagnosis"].apply(
         lambda x: 0 if str(x).strip().lower() == "healthy" else 1
-    )
+    ) 
     return df_meta
 
 
-def extract_features(record_id: str, data_dir: str) -> dict | None:
+def _extract_standard_feature_block(y: np.ndarray, sr: float, prefix: str = "") -> dict:
+    mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
+    centroid = librosa.feature.spectral_centroid(y=y, sr=sr)
+    bandwidth = librosa.feature.spectral_bandwidth(y=y, sr=sr)
+    zcr = librosa.feature.zero_crossing_rate(y)
+
+    features = {
+        f"{prefix}centroid_mean": float(np.mean(centroid)),
+        f"{prefix}centroid_std": float(np.std(centroid)),
+        f"{prefix}bandwidth_mean": float(np.mean(bandwidth)),
+        f"{prefix}bandwidth_std": float(np.std(bandwidth)),
+        f"{prefix}zcr_mean": float(np.mean(zcr)),
+        f"{prefix}zcr_std": float(np.std(zcr)),
+    }
+
+    for i in range(13):
+        features[f"{prefix}mfcc_{i + 1}_mean"] = float(np.mean(mfccs[i]))
+        features[f"{prefix}mfcc_{i + 1}_std"] = float(np.std(mfccs[i]))
+
+    return features
+
+
+def _decompose_signal(y: np.ndarray, method: str = "ceemdan", max_imfs: int = 3):
+    from PyEMD import CEEMDAN, EMD
+
+    if method == "ceemdan":
+        decomposer = CEEMDAN(trials=20, random_seed=42)
+        imfs = decomposer.ceemdan(y)
+    else:
+        decomposer = EMD()
+        imfs = decomposer.emd(y)
+
+    if imfs is None or len(imfs) == 0:
+        return []
+    return imfs[:max_imfs]
+
+
+def extract_features(
+    record_id: str,
+    data_dir: str,
+    use_decomposition: bool = False,
+    decomposition_method: str = "ceemdan",
+    max_imfs: int = 3,
+) -> dict | None:
     record_path = os.path.join(data_dir, record_id)
     try:
         record = wfdb.rdrecord(record_path)
         y = record.p_signal[:, 0]
         sr = record.fs
 
-        mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
-        centroid = librosa.feature.spectral_centroid(y=y, sr=sr)
-        bandwidth = librosa.feature.spectral_bandwidth(y=y, sr=sr)
-        zcr = librosa.feature.zero_crossing_rate(y)
+        features = {"ID": record_id}
+        features.update(_extract_standard_feature_block(y, sr, prefix="raw_" if use_decomposition else ""))
 
-        features = {
-            "ID": record_id,
-            "centroid_mean": float(np.mean(centroid)),
-            "centroid_std": float(np.std(centroid)),
-            "bandwidth_mean": float(np.mean(bandwidth)),
-            "bandwidth_std": float(np.std(bandwidth)),
-            "zcr_mean": float(np.mean(zcr)),
-            "zcr_std": float(np.std(zcr)),
-        }
-
-        for i in range(13):
-            features[f"mfcc_{i + 1}_mean"] = float(np.mean(mfccs[i]))
-            features[f"mfcc_{i + 1}_std"] = float(np.std(mfccs[i]))
+        if use_decomposition:
+            imfs = _decompose_signal(y, method=decomposition_method, max_imfs=max_imfs)
+            for idx, imf in enumerate(imfs, start=1):
+                features.update(_extract_standard_feature_block(imf, sr, prefix=f"imf{idx}_"))
 
         return features
     except Exception:
         return None
 
 
-def build_dataset(data_dir: str) -> pd.DataFrame:
+def build_dataset(
+    data_dir: str,
+    use_decomposition: bool = False,
+    decomposition_method: str = "ceemdan",
+    max_imfs: int = 3,
+    max_records: int | None = None,
+    feature_cache_path: str | None = None,
+) -> pd.DataFrame:
+    if feature_cache_path and os.path.exists(feature_cache_path):
+        return pd.read_csv(feature_cache_path)
+
     df_meta = parse_metadata(data_dir)
+    if max_records is not None:
+        df_meta = df_meta.head(max_records)
+
     all_features = []
-    for record_id in df_meta["ID"]:
-        feat = extract_features(record_id, data_dir)
+    total = len(df_meta)
+    for i, record_id in enumerate(df_meta["ID"], start=1):
+        if i % 20 == 0 or i == total:
+            print(f"Feature extraction progress: {i}/{total}")
+
+        feat = extract_features(
+            record_id,
+            data_dir,
+            use_decomposition=use_decomposition,
+            decomposition_method=decomposition_method,
+            max_imfs=max_imfs,
+        )
         if feat is not None:
             all_features.append(feat)
 
     df_features = pd.DataFrame(all_features)
     df = pd.merge(df_meta, df_features, on="ID", how="inner")
+
+    if feature_cache_path:
+        os.makedirs(os.path.dirname(feature_cache_path), exist_ok=True)
+        df.to_csv(feature_cache_path, index=False)
+
     return df
 
 
@@ -183,13 +279,35 @@ def get_score_vector(model, x):
     return model.predict(x)
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Enhanced VOICED modeling pipeline")
+    parser.add_argument("--use-decomposition", action="store_true", help="Enable EMD/CEEMDAN decomposition features")
+    parser.add_argument("--decomposition-method", choices=["emd", "ceemdan"], default="ceemdan")
+    parser.add_argument("--max-imfs", type=int, default=3)
+    parser.add_argument("--use-relieff", action="store_true", help="Enable ReliefF feature selection")
+    parser.add_argument("--max-records", type=int, default=None, help="Optional debug mode to run on subset")
+    parser.add_argument("--feature-cache", type=str, default=None, help="Optional CSV cache path for extracted features")
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
     data_dir = "voice-icar-federico-ii-database-1.0.0"
     output_dir = "outputs"
     os.makedirs(output_dir, exist_ok=True)
 
     print("Building dataset with audio + metadata features...")
-    df = build_dataset(data_dir)
+    if args.use_decomposition:
+        print(f"Decomposition enabled: method={args.decomposition_method}, max_imfs={args.max_imfs}")
+
+    df = build_dataset(
+        data_dir,
+        use_decomposition=args.use_decomposition,
+        decomposition_method=args.decomposition_method,
+        max_imfs=args.max_imfs,
+        max_records=args.max_records,
+        feature_cache_path=args.feature_cache,
+    )
     print(f"Rows: {len(df)}, Columns: {df.shape[1]}")
     print("Class distribution:")
     print(df["Label"].value_counts())
@@ -254,6 +372,20 @@ def main():
             {
                 "clf__C": [0.5, 1.0, 5.0],
                 "clf__gamma": ["scale", 0.01, 0.1],
+            },
+        ),
+        "SVM_Cubic": (
+            SVC(
+                kernel="poly",
+                degree=3,
+                probability=True,
+                class_weight="balanced",
+                random_state=42,
+            ),
+            {
+                "clf__C": [0.5, 1.0, 5.0, 10.0],
+                "clf__gamma": ["scale", 0.01, 0.1],
+                "clf__coef0": [0.0, 1.0],
             },
         ),
         "RandomForest": (
@@ -322,22 +454,44 @@ def main():
     best_params = {}
 
     print("\nRunning model selection and threshold tuning...")
+    minority_count = int((y_train == 0).sum())
+    majority_count = int((y_train == 1).sum())
+    minority_count = min(minority_count, majority_count)
+
+    if minority_count >= 25:
+        cv_splits = 5
+    elif minority_count >= 10:
+        cv_splits = 3
+    else:
+        cv_splits = 2
+
+    if minority_count >= 6:
+        sampler = SMOTE(random_state=42, k_neighbors=2)
+        sampler_name = "SMOTE(k_neighbors=2)"
+    else:
+        sampler = RandomOverSampler(random_state=42)
+        sampler_name = "RandomOverSampler"
+
+    print(f"Sampling strategy: {sampler_name}, CV folds: {cv_splits}")
+
     for model_name, (estimator, param_grid) in models.items():
         print(f"\nTraining {model_name}...")
 
-        pipeline = ImbPipeline(
-            steps=[
-                ("prep", preprocessor),
-                ("smote", SMOTE(random_state=42)),
-                ("clf", estimator),
-            ]
-        )
+        steps = [("prep", preprocessor)]
+        if args.use_relieff:
+            steps.append(("selector", ReliefFSelector(n_features_to_select=30, n_neighbors=50)))
+            param_grid = dict(param_grid)
+            param_grid["selector__n_features_to_select"] = [20, 30, 40]
+        steps.append(("smote", sampler))
+        steps.append(("clf", estimator))
+
+        pipeline = ImbPipeline(steps=steps)
 
         search = GridSearchCV(
             estimator=pipeline,
             param_grid=param_grid,
             scoring="balanced_accuracy",
-            cv=5,
+            cv=cv_splits,
             n_jobs=-1,
             verbose=0,
         )
@@ -373,13 +527,24 @@ def main():
     df_results = pd.DataFrame(results).sort_values(
         by=["specificity", "sensitivity", "f1"], ascending=False
     )
-    df_results.to_csv(os.path.join(output_dir, "enhanced_model_results.csv"), index=False)
+    result_suffix = "baseline"
+    if args.use_decomposition and args.use_relieff:
+        result_suffix = f"{args.decomposition_method}_relieff"
+    elif args.use_decomposition:
+        result_suffix = args.decomposition_method
+    elif args.use_relieff:
+        result_suffix = "relieff"
 
-    with open(os.path.join(output_dir, "best_params.json"), "w", encoding="utf-8") as f:
+    result_csv = os.path.join(output_dir, f"enhanced_model_results_{result_suffix}.csv")
+    result_json = os.path.join(output_dir, f"best_params_{result_suffix}.json")
+
+    df_results.to_csv(result_csv, index=False)
+
+    with open(result_json, "w", encoding="utf-8") as f:
         json.dump(best_params, f, indent=2)
 
-    print("\nSaved results to outputs/enhanced_model_results.csv")
-    print("Saved hyperparameters to outputs/best_params.json")
+    print(f"\nSaved results to {result_csv}")
+    print(f"Saved hyperparameters to {result_json}")
     print("\nTop models by specificity:")
     print(df_results[["model", "specificity", "sensitivity", "f1", "accuracy"]].head(5))
 

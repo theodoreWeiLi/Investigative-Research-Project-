@@ -4,7 +4,7 @@
 **Course:** PHM5015 Investigative Research Project
 
 ## Abstract
-This report presents an enhanced machine learning analysis of the VOICED (Voice ICar Federico II) database to distinguish healthy and pathological voices. In addition to acoustic features (MFCCs, spectral centroid, spectral bandwidth, and zero crossing rate), clinical metadata (age, gender, smoker status, VHI, RSI) were incorporated. A stratified train/validation/test protocol with cross-validated hyperparameter tuning was implemented, including explicit optimization of tree depth (max_depth) and decision thresholds to improve specificity while maintaining acceptable sensitivity. Seven supervised models were evaluated: Logistic Regression, Support Vector Machine, Random Forest, K-Nearest Neighbors, Multi-Layer Perceptron, XGBoost, and CatBoost. XGBoost delivered the strongest overall trade-off (Accuracy 0.786, Sensitivity 0.867, Specificity 0.583, F1 0.852), while CatBoost matched the best specificity (0.583) with lower sensitivity. These findings demonstrate that metadata fusion and model-level tuning can materially improve robustness for voice-based pathological screening.
+This report presents an enhanced machine learning analysis of the VOICED (Voice ICar Federico II) database to distinguish healthy and pathological voices. In addition to acoustic features (MFCCs, spectral centroid, spectral bandwidth, and zero crossing rate), clinical metadata (age, gender, smoker status, VHI, RSI) were incorporated. A stratified train/validation/test protocol with cross-validated hyperparameter tuning was implemented, including explicit optimization of tree depth (max_depth) and decision thresholds to improve specificity while maintaining acceptable sensitivity. Eight supervised models were evaluated: Logistic Regression, Support Vector Machine (RBF), Support Vector Machine (Cubic polynomial), Random Forest, K-Nearest Neighbors, Multi-Layer Perceptron, XGBoost, and CatBoost. K-Nearest Neighbors and SVM-Cubic achieved the highest specificity (0.667), while KNN provided the strongest specificity-sensitivity balance (Accuracy 0.738, Sensitivity 0.767, Specificity 0.667, F1 0.807). These findings demonstrate that metadata fusion and model-level tuning can materially improve robustness for voice-based pathological screening.
 
 ## 1. Introduction
 Voice and speech analysis are increasingly gaining attention as non-invasive biomarkers for health monitoring. With the proliferation of high-quality microphones in personal devices, voice-based diagnostics offer a scalable and accessible approach for early disease detection. Vocal fold pathologies and dysphonias can be non-invasively screened using physiological audio recordings, providing clinical decision support systems with objective diagnostic metrics.
@@ -32,9 +32,10 @@ Class imbalance (57 healthy vs. 151 pathological) was addressed by:
 3.  **Threshold optimization:** decision thresholds were tuned on the validation set to maximize specificity under a sensitivity constraint ($\geq 0.70$).
 
 ### 2.4 Model Selection
-**Supervised Learning:** Seven classification algorithms were trained for binary diagnosis (healthy vs. pathological):
+**Supervised Learning:** Eight classification algorithms were trained for binary diagnosis (healthy vs. pathological):
 *   Logistic Regression (LR)
 *   Support Vector Machine (SVM, RBF kernel)
+*   Support Vector Machine (SVM, cubic polynomial kernel, degree = 3)
 *   Random Forest (RF)
 *   K-Nearest Neighbors (KNN)
 *   Multi-Layer Perceptron (MLP)
@@ -52,15 +53,16 @@ The models were evaluated on the 20% hold-out test set using Accuracy, Sensitivi
 
 | Algorithm | Accuracy | Sensitivity | Specificity | F1-Score |
 | :--- | :--- | :--- | :--- | :--- |
-| **Logistic Regression** | 0.667 | 0.767 | 0.417 | 0.767 |
-| **Support Vector Machine** | 0.690 | 0.767 | 0.500 | 0.780 |
-| **Random Forest** | 0.786 | 0.967 | 0.333 | 0.866 |
-| **K-Nearest Neighbors** | 0.762 | 0.967 | 0.250 | 0.853 |
-| **Neural Network (MLP)** | 0.619 | 0.700 | 0.417 | 0.724 |
-| **XGBoost** | 0.786 | 0.867 | 0.583 | 0.852 |
-| **CatBoost** | 0.667 | 0.700 | 0.583 | 0.750 |
+| **Logistic Regression** | 0.643 | 0.800 | 0.250 | 0.762 |
+| **Support Vector Machine (RBF)** | 0.595 | 0.633 | 0.500 | 0.691 |
+| **Support Vector Machine (Cubic)** | 0.714 | 0.733 | 0.667 | 0.786 |
+| **Random Forest** | 0.714 | 0.767 | 0.583 | 0.793 |
+| **K-Nearest Neighbors** | 0.738 | 0.767 | 0.667 | 0.807 |
+| **Neural Network (MLP)** | 0.619 | 0.733 | 0.333 | 0.733 |
+| **XGBoost** | 0.762 | 0.900 | 0.417 | 0.844 |
+| **CatBoost** | 0.714 | 0.833 | 0.417 | 0.806 |
 
-XGBoost provided the strongest overall balance, achieving the highest specificity jointly with CatBoost (0.583) while preserving high sensitivity (0.867). Random Forest and KNN reached very high sensitivity (0.967) but suffered lower specificity, indicating tendency to over-predict pathology. SVM improved to moderate balance (specificity 0.500) under tuned settings.
+KNN and SVM-Cubic jointly achieved the highest specificity (0.667), with KNN showing the best overall balance in this run (accuracy 0.738, F1 0.807). The cubic kernel variant improved substantially over the baseline RBF-SVM for both specificity and accuracy. XGBoost remained the most sensitivity-oriented model (0.900) but with lower specificity (0.417).
 
 ### 3.2 Unsupervised Clustering
 The K-Means clustering algorithm partitioned the data into two mathematical centroids. When visualized via PCA, significant overlap between the clusters was observed, implying that the pure acoustic difference between mild dysphonias and healthy voices is not linearly separable without supervised labeled boundaries. Cross-tabulation revealed that unsupervised clustering alone struggles to perfectly mirror clinical diagnoses due to these overlapping complex features.
@@ -68,16 +70,16 @@ The K-Means clustering algorithm partitioned the data into two mathematical cent
 ## 4. Discussion and Interpretation
 Voice analysis presents a promising frontier in precision medicine, offering non-intrusive diagnostic capabilities. However, addressing class imbalance is structurally critical when evaluating physiological datasets like VOICED. Prior to balancing, models theoretically achieved near 100% sensitivity but <20% specificity by taking the "mathematically safe" route of predicting the majority class. With SMOTE, a clinical trade-off was achieved.
 
-The revised pipeline shows that combining metadata (including smoker status), explicit hyperparameter tuning (including RF `max_depth`), and threshold adjustment can improve clinical balance. In particular, boosted tree models were more robust than baseline linear and distance-based models for this small, imbalanced dataset.
+The revised pipeline shows that combining metadata (including smoker status), explicit hyperparameter tuning (including RF `max_depth`), and threshold adjustment can improve clinical balance. Introducing a cubic-kernel SVM, inspired by recent VOICED-focused literature, improved boundary flexibility and yielded better specificity than RBF-SVM in this dataset.
 
-The performance contrast across models still reflects a clinical trade-off: models optimized for sensitivity (RF/KNN) may increase false positives, while models with stronger specificity (XGBoost/CatBoost) are more conservative in labeling healthy cases. For screening contexts, a high-sensitivity operating point may remain preferred; for confirmatory triage, specificity-oriented operating points are clinically valuable.
+The performance contrast across models still reflects a clinical trade-off: models optimized for sensitivity (XGBoost) may increase false positives, while models with stronger specificity (KNN and SVM-Cubic) are more conservative in labeling healthy cases. For screening contexts, a high-sensitivity operating point may remain preferred; for confirmatory triage, specificity-oriented operating points are clinically valuable.
 
 The PCA and clustering results further prove the necessity of supervised learning; unsupervised clustering struggles with the overlapping acoustic markers characteristic of mild dysphonias. 
 
 **Limitations and Future Work:** The cohort size remains limited (208 recordings), which constrains model generalizability and hyperparameter stability. Future work should add perturbation features such as jitter and shimmer, evaluate repeated or nested cross-validation, and validate on external cohorts. Deep learning on spectrograms can be explored after stronger data scaling.
 
 ## 5. Conclusion
-This study developed and revised a machine learning pipeline for pathological voice classification in VOICED. By integrating acoustic and metadata features, applying balanced preprocessing with SMOTE, and tuning both hyperparameters and decision thresholds, the enhanced models improved the sensitivity-specificity trade-off. XGBoost achieved the strongest overall performance in the final evaluation. These results support the potential of voice as a practical digital biomarker while highlighting the need for larger datasets and richer voice perturbation features for clinical deployment.
+This study developed and revised a machine learning pipeline for pathological voice classification in VOICED. By integrating acoustic and metadata features, applying balanced preprocessing with SMOTE, and tuning both hyperparameters and decision thresholds, the enhanced models improved the sensitivity-specificity trade-off. KNN and SVM-Cubic provided the strongest specificity in the final evaluation, while XGBoost provided the highest sensitivity. These results support the potential of voice as a practical digital biomarker while highlighting the need for larger datasets and richer voice perturbation features for clinical deployment.
 
 ## 6. References
 [1] A. L. Goldberger et al., “PhysioBank, PhysioToolkit, and PhysioNet: Components of a New Research Resource for Complex Physiologic Signals,” Circulation, vol. 101, no. 23, pp. e215–e220, Jun. 2000.  
